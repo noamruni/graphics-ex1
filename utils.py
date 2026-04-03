@@ -64,7 +64,9 @@ class SeamImage:
         xx, yy = np.meshgrid(range(self.w), range(self.h))
         self.idx_map = np.stack((yy, xx), axis=-1)
 
-    @NI_decor
+
+
+    # @NI_decor
     def rgb_to_grayscale(self, np_img):
         """ Converts a np RGB image into grayscale (using self.gs_weights).
         Parameters
@@ -76,18 +78,20 @@ class SeamImage:
             Use NumpyPy vectorized matrix multiplication for high performance.
             To prevent outlier values in the boundaries, we recommend to pad them with 0.5
         """
-        # gs_img = TODO
+        gs_img = np.dot(np_img[...,:3], [0.2989, 0.5870, 0.1140])
+
 
         # uncomment for padding (a common pracctive in image processing)
-        # gs_img[0, :] = .5
-        # gs_img[-1, :] = .5
-        # gs_img[:, 0] = .5
-        # gs_img[:, -1] = .5
-        # return gs_img
+        gs_img[0, :] = .5
+        gs_img[-1, :] = .5
+        gs_img[:, 0] = .5
+        gs_img[:, -1] = .5
 
-        raise NotImplementedError("TODO: Implement SeamImage.rgb_to_grayscale")
+        return gs_img
 
-    @NI_decor
+        # raise NotImplementedError("TODO: Implement SeamImage.rgb_to_grayscale")
+
+    # @NI_decor
     def calc_gradient_magnitude(self):
         """ Calculate gradient magnitude of a grayscale image
 
