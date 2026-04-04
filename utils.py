@@ -103,7 +103,35 @@ class SeamImage:
             - keep in mind that values must be in range [0,1]
             - np.gradient or other off-the-shelf tools are NOT allowed, however feel free to compare yourself to them
         """
-        raise NotImplementedError("TODO: Implement SeamImage.calc_gradient_magnitude")
+        # Sobel operators
+        sobel_x = np.array([[-1, 0, 1],
+                           [-2, 0, 2],
+                           [-1, 0, 1]], dtype=np.float32).flatten()
+        
+        sobel_y = np.array([[-1, -2, -1],
+                           [0, 0, 0],
+                           [1, 2, 1]], dtype=np.float32).flatten()
+        
+        # Pad the image
+        gs_padded = np.pad(self.gs, ((1, 1), (1, 1)), mode='constant', constant_values=0.5)
+        
+        h, w = self.gs.shape
+        gradient_mag = np.zeros((h, w), dtype=np.float32)
+        
+        # Apply convolution using np.dot
+        for y in range(h):
+            for x in range(w):
+                neighborhood = gs_padded[y:y+3, x:x+3].flatten().astype(np.float32)
+                gx = np.dot(neighborhood, sobel_x)
+                gy = np.dot(neighborhood, sobel_y)
+                gradient_mag[y, x] = np.float32(np.sqrt(gx**2 + gy**2))
+        
+        # Normalize to [0, 1] range
+        max_val = np.max(gradient_mag)
+        if max_val > 0:
+            gradient_mag = gradient_mag / max_val
+        
+        return gradient_mag.astype(np.float32)
 
 
     def update_ref_mat(self):
