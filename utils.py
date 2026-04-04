@@ -65,8 +65,6 @@ class SeamImage:
         self.idx_map = np.stack((yy, xx), axis=-1)
 
 
-
-    # @NI_decor
     def rgb_to_grayscale(self, np_img):
         """ Converts a np RGB image into grayscale (using self.gs_weights).
         Parameters
@@ -91,7 +89,6 @@ class SeamImage:
 
         # raise NotImplementedError("TODO: Implement SeamImage.rgb_to_grayscale")
 
-    # @NI_decor
     def calc_gradient_magnitude(self):
         """ Calculate gradient magnitude of a grayscale image
 
@@ -195,7 +192,6 @@ class SeamImage:
         """
         raise NotImplementedError("TODO: Implement SeamImage.find_minimal_seam in one of the subclasses")
 
-    @NI_decor
     def remove_seam(self, seam: List[int]):
         """ Removes a seam from self.rgb (you may create a resized version, like self.resized_rgb)
 
@@ -205,7 +201,32 @@ class SeamImage:
 
         :arg seam: The seam to remove
         """
-        raise NotImplementedError("TODO: Implement SeamImage.remove_seam")
+        # Create a boolean mask for pixels to keep (True = keep, False = remove)
+        mask = np.ones((self.h, self.w), dtype=bool)
+        
+        # Mark seam pixels as False (to be removed) using vectorized indexing. 
+        # This is more efficient than a loop.
+        mask[np.arange(self.h), seam] = False
+        
+        # Expand mask to 3 channels (RGB)
+        mask_3d = np.stack([mask] * 3, axis=2)
+        
+        # Remove seam from resized_rgb, by udating it with the mask and reshaping it to the new dimensions
+        self.resized_rgb = self.resized_rgb[mask_3d].reshape(self.h, self.w - 1, 3)
+        
+        # Update grayscale version
+        self.resized_gs = self.resized_gs[mask].reshape(self.h, self.w - 1)
+        
+        # Update idx_map by removing the seam column
+        self.idx_map = self.idx_map[mask].reshape(self.h, self.w - 1, 2)
+        
+        # Mark seam on visualization if enabled
+        if self.vis_seams:
+            self.seams_rgb[np.arange(self.h), seam] = [1.0, 0.0, 0.0]  # Red color
+            self.cumm_mask[np.arange(self.h), seam] = True
+        
+        # Update dimensions
+        self.w -= 1
 
     @NI_decor
     def rotate_mats(self, clockwise: bool):
@@ -295,7 +316,24 @@ class GreedySeamImage(SeamImage):
         The first pixel of the seam should be the pixel with the lowest cost.
         Every row chooses the next pixel based on which neighbor has the lowest cost.
         """
-        raise NotImplementedError("TODO: Implement GreedySeamImage.find_minimal_seam")
+        # build list to contain seam indices
+        seam = []
+    
+        # find minimal energy pixel in first row
+        min_energy_idx = np.argmin(self.E[0])
+        seam.append(min_energy_idx)
+        # iterate over rows and find the next pixel in the seam
+        for i in range(1, self.h):
+            prev_idx = seam[-1]
+            
+            # define the range of indices to check (prev_idx-1, prev_idx, prev_idx+1)
+            idx_range = range(max(prev_idx - 1, 0), min(prev_idx + 2, self.w))
+            
+            # find the index with the minimum energy in the current row within the defined range
+            min_energy_idx = min(idx_range, key=lambda x: self.E[i, x])
+            seam.append(min_energy_idx)
+
+        return seam
 
 
 class DPSeamImage(SeamImage):
