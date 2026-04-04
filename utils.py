@@ -109,10 +109,11 @@ class SeamImage:
                            [0, 0, 0],
                            [1, 2, 1]], dtype=np.float32).flatten()
         
-        # Pad the image
-        gs_padded = np.pad(self.gs, ((1, 1), (1, 1)), mode='constant', constant_values=0.5)
+        # Pad the resized grayscale image
+        gs_src = self.resized_gs
+        gs_padded = np.pad(gs_src, ((1, 1), (1, 1)), mode='constant', constant_values=0.5)
         
-        h, w = self.gs.shape
+        h, w = gs_src.shape
         gradient_mag = np.zeros((h, w), dtype=np.float32)
         
         # Apply convolution using np.dot
@@ -138,7 +139,15 @@ class SeamImage:
             - Given the latest computed seam, you need to track its original indices and mark them (self.cumm_mask) using self.ixd_map
             - Resize self.idx_map each seam update
         """
-        raise NotImplementedError("TODO: Implement SeamImage.calc_gradient_magnitude")
+        # Get the latest seam
+        seam = self.seam_history[-1]
+        
+        # Update cumm_mask with original indices from idx_map
+        for i, j in enumerate(seam):
+            orig_y, orig_x = self.idx_map[i, j]
+            self.cumm_mask[int(orig_y), int(orig_x)] = True
+        
+        # idx_map is resized in remove_seam; no resizing here
 
     def reinit(self):
         """
@@ -220,31 +229,43 @@ class SeamImage:
         # Update idx_map by removing the seam column
         self.idx_map = self.idx_map[mask].reshape(self.h, self.w - 1, 2)
         
-        # Mark seam on visualization if enabled
+        # Mark seam on visualization if enabled (original indices handled in update_ref_mat)
         if self.vis_seams:
             self.seams_rgb[np.arange(self.h), seam] = [1.0, 0.0, 0.0]  # Red color
-            self.cumm_mask[np.arange(self.h), seam] = True
         
         # Update dimensions
         self.w -= 1
 
-    @NI_decor
     def rotate_mats(self, clockwise: bool):
         """
         Rotates the matrices either clockwise or counter-clockwise.
         """
-        raise NotImplementedError("TODO: Implement SeamImage.rotate_mats")
+        # Determine rotation direction: -1 for clockwise, 1 for counter-clockwise
+        k = -1 if clockwise else 1
+        
+        # Rotate all matrices
+        self.resized_rgb = np.rot90(self.resized_rgb, k=k)
+        self.resized_gs = np.rot90(self.resized_gs, k=k)
+        self.E = np.rot90(self.E, k=k)
+        self.cumm_mask = np.rot90(self.cumm_mask, k=k)
+        
+        if self.vis_seams:
+            self.seams_rgb = np.rot90(self.seams_rgb, k=k)
+        
+        # Rotate index map
+        self.idx_map = np.rot90(self.idx_map, k=k)
+        
+        # Swap height and width after rotation
+        self.h, self.w = self.w, self.h
 
-    @NI_decor
     def seams_removal_vertical(self, num_remove: int):
-        """ A wrapper for removing num_remove horizontal seams (just a recommendation)
+        """ A wrapper for removing num_remove vertical seams
 
         Parameters:
-            num_remove (int): umber of vertical seam to be removed
+            num_remove (int): number of vertical seam to be removed
         """
-        raise NotImplementedError("TODO: Implement SeamImage.seams_removal_horizontal")
+        self.seams_removal(num_remove)
 
-    @NI_decor
     def seams_removal_horizontal(self, num_remove: int):
         """ Removes num_remove horizontal seams by rotating the image, removing vertical seams, and restoring the original rotation.
 
@@ -259,13 +280,14 @@ class SeamImage:
                 SOME_OPERATION(...)
             and thats it!
         """
-        raise NotImplementedError("TODO: Implement SeamImage.seams_removal_horizontal")
+        self.rotate_mats(clockwise=False)  # Rotate counter-clockwise 90°
+        self.seams_removal(num_remove)     # Remove vertical seams (which are now horizontal)
+        self.rotate_mats(clockwise=True)   # Rotate back clockwise 90°
 
     """
     BONUS SECTION
     """
 
-    @NI_decor
     def seams_addition(self, num_add: int):
         """ BONUS: adds num_add seams to the image
 
@@ -280,7 +302,6 @@ class SeamImage:
         """
         raise NotImplementedError("TODO (Bonus): Implement SeamImage.seams_addition")
 
-    @NI_decor
     def seams_addition_horizontal(self, num_add: int):
         """ A wrapper for removing num_add horizontal seams (just a recommendation)
 
@@ -361,7 +382,30 @@ class DPSeamImage(SeamImage):
             As taught, the energy is calculated from top to bottom.
             You might find the function 'np.roll' useful.
         """
-        raise NotImplementedError("TODO: Implement DPSeamImage.calc_M")
+        gs = self.resized_gs
+        h, w = gs.shape
+        M = np.zeros((h, w), dtype=np.float32)
+        
+        # Initialize first row with energy values
+        M[0, :] = self.E[0, :]
+        
+        # Fill the matrix row by row from top to bottom
+        for i in range(1, h):
+            for j in range(w):
+                left = gs[i, j - 1] if j > 0 else gs[i, j]
+                right = gs[i, j + 1] if j < w - 1 else gs[i, j]
+                
+                c_v = np.abs(right - left)
+                c_l = c_v + np.abs(gs[i - 1, j] - left) if j > 0 else np.inf
+                c_r = c_v + np.abs(gs[i - 1, j] - right) if j < w - 1 else np.inf
+                
+                m_left = M[i - 1, j - 1] + c_l if j > 0 else np.inf
+                m_up = M[i - 1, j] + c_v
+                m_right = M[i - 1, j + 1] + c_r if j < w - 1 else np.inf
+                
+                M[i, j] = self.E[i, j] + min(m_left, m_up, m_right)
+        
+        return M.astype(np.float32)
 
     def init_mats(self):
         self.M = self.calc_M()
@@ -385,7 +429,6 @@ class DPSeamImage(SeamImage):
         h, w = M.shape
 
 
-    @NI_decor
     def find_minimal_seam(self) -> List[int]:
         """
         Finds the minimal seam by using dynamic programming.
@@ -401,7 +444,56 @@ class DPSeamImage(SeamImage):
             ii) fill in the backtrack matrix corresponding to M
             iii) seam backtracking: calculates the actual indices of the seam
         """
-        raise NotImplementedError("TODO: implement DPSeamImage.find_minimal_seam")
+        # Step i: Update M matrix and initialize backtrack matrix
+        self.M = self.calc_M()
+        gs = self.resized_gs
+        h, w = self.M.shape
+        backtrack_mat = np.zeros((h, w), dtype=int)
+        
+        # Step ii: Fill backtrack matrix using forward-looking costs
+        for i in range(1, h):
+            for j in range(w):
+                left = gs[i, j - 1] if j > 0 else gs[i, j]
+                right = gs[i, j + 1] if j < w - 1 else gs[i, j]
+                
+                c_v = np.abs(right - left)
+                c_l = c_v + np.abs(gs[i - 1, j] - left) if j > 0 else np.inf
+                c_r = c_v + np.abs(gs[i - 1, j] - right) if j < w - 1 else np.inf
+                
+                options = [
+                    self.M[i - 1, j - 1] + c_l if j > 0 else np.inf,
+                    self.M[i - 1, j] + c_v,
+                    self.M[i - 1, j + 1] + c_r if j < w - 1 else np.inf,
+                ]
+                backtrack_mat[i, j] = int(np.argmin(options))
+        
+        # Step iii: Backtrack from bottom to find the seam
+        seam = []
+        
+        # Find minimum in last row
+        min_j = np.argmin(self.M[-1, :])
+        seam.append(int(min_j))
+        
+        # Backtrack from bottom to top
+        for i in range(h - 1, 0, -1):
+            current_j = seam[-1]
+            move = backtrack_mat[i, current_j]
+            
+            # Reconstruct previous column based on move
+            # 0 = came from left diagonal, 1 = came from vertical, 2 = came from right diagonal
+            if move == 0:  # came from left
+                prev_j = current_j - 1
+            elif move == 1:  # came from vertical
+                prev_j = current_j
+            else:  # move == 2, came from right
+                prev_j = current_j + 1
+            
+            seam.append(int(prev_j))
+        
+        # Reverse seam (we built it bottom-up)
+        seam.reverse()
+        
+        return seam
 
 def scale_to_shape(orig_shape: np.ndarray, scale_factors: list):
     """ Converts scale into shape
@@ -413,20 +505,42 @@ def scale_to_shape(orig_shape: np.ndarray, scale_factors: list):
     Returns
         the new shape
     """
-    raise NotImplementedError("TODO: Implement scale_to_shape")
+    new_height = int(orig_shape[0] * scale_factors[0])
+    new_width = int(orig_shape[1] * scale_factors[1])
+    return np.array([new_height, new_width], dtype=int)
 
 
-def resize_seam_carving(seam_img: SeamImage, shapes: np.ndarray):
+def resize_seam_carving(seam_img: SeamImage, shapes: tuple):
     """ Resizes an image using Seam Carving algorithm
 
     Parameters:
         seam_img (SeamImage) The SeamImage instance to resize
-        shapes (np.ndarray): desired shape (y,x)
+        shapes (tuple): (orig_shape, new_shape) where each is [height, width]
 
     Returns
         the resized rgb image
     """
-    raise NotImplementedError("TODO: Implement resize_seam_carving")
+    orig_shape, new_shape = shapes
+    orig_h, orig_w = orig_shape[0], orig_shape[1]
+    new_h, new_w = new_shape[0], new_shape[1]
+    
+    # Work on a fresh instance to avoid mutating the input object
+    sc_cls = seam_img.__class__
+    sc_obj = sc_cls(img_path=seam_img.path, vis_seams=seam_img.vis_seams)
+    
+    # Calculate seams to remove
+    num_vertical_remove = orig_w - new_w
+    num_horizontal_remove = orig_h - new_h
+    
+    # Remove vertical seams first
+    if num_vertical_remove > 0:
+        sc_obj.seams_removal_vertical(num_vertical_remove)
+    
+    # Remove horizontal seams
+    if num_horizontal_remove > 0:
+        sc_obj.seams_removal_horizontal(num_horizontal_remove)
+    
+    return sc_obj.resized_rgb
 
 
 def bilinear(image, new_shape):

@@ -2,3 +2,4 @@ images/.DS_Store
 .python-version
 __pycache__/*
 
+resized_rgb.jpg
