@@ -1,6 +1,6 @@
 import numpy as np
 from PIL import Image
-from numba import jit
+from numba import jit, prange
 from tqdm import tqdm
 from abc import abstractmethod, abstractstaticmethod
 from os.path import basename
@@ -16,6 +16,47 @@ def NI_decor(fn):
             print(e)
 
     return wrap_fn
+
+
+@jit(nopython=True)
+def _rgb_to_grayscale(np_img):
+    gs_img = np_img[:,:,0]*np.float32(0.2989) + np_img[:,:,1]*np.float32(0.5870) + np_img[:,:,2]*np.float32(0.1140)
+    gs_img[0, :] = .5
+    gs_img[-1, :] = .5
+    gs_img[:, 0] = .5
+    gs_img[:, -1] = .5
+    return gs_img
+
+
+@jit(nopython=True, parallel=True)
+def _calc_gradient_magnitude(gs_src):
+    sobel_x = np.array([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], dtype=np.float32)
+    sobel_y = np.array([[-1., -2., -1.], [0., 0., 0.], [1., 2., 1.]], dtype=np.float32)
+
+    h, w = gs_src.shape
+    gs_padded = np.zeros((h + 2, w + 2), dtype=np.float32)
+    gs_padded[1:h+1, 1:w+1] = gs_src
+    gs_padded[0, :] = 0.5
+    gs_padded[h+1, :] = 0.5
+    gs_padded[:, 0] = 0.5
+    gs_padded[:, w+1] = 0.5
+
+    gradient_mag = np.zeros((h, w), dtype=np.float32)
+    for y in prange(h):
+        for x in range(w):
+            gx = np.float32(0.0)
+            gy = np.float32(0.0)
+            for dy in range(3):
+                for dx in range(3):
+                    v = gs_padded[y + dy, x + dx]
+                    gx += v * sobel_x[dy, dx]
+                    gy += v * sobel_y[dy, dx]
+            gradient_mag[y, x] = np.sqrt(gx * gx + gy * gy)
+
+    max_val = np.max(gradient_mag)
+    if max_val > 0:
+        gradient_mag = gradient_mag / max_val
+    return gradient_mag
 
 
 class SeamImage:
@@ -64,7 +105,6 @@ class SeamImage:
         xx, yy = np.meshgrid(range(self.w), range(self.h))
         self.idx_map = np.stack((yy, xx), axis=-1)
 
-
     def rgb_to_grayscale(self, np_img):
         """ Converts a np RGB image into grayscale (using self.gs_weights).
         Parameters
@@ -76,19 +116,7 @@ class SeamImage:
             Use NumpyPy vectorized matrix multiplication for high performance.
             To prevent outlier values in the boundaries, we recommend to pad them with 0.5
         """
-        gs_img = np.dot(np_img[...,:3], [0.2989, 0.5870, 0.1140])
-
-
-        # uncomment for padding (a common pracctive in image processing)
-        gs_img[0, :] = .5
-        gs_img[-1, :] = .5
-        gs_img[:, 0] = .5
-        gs_img[:, -1] = .5
-
-        return gs_img
-
-        # raise NotImplementedError("TODO: Implement SeamImage.rgb_to_grayscale")
-
+        return _rgb_to_grayscale(np_img.astype(np.float32))
     def calc_gradient_magnitude(self):
         """ Calculate gradient magnitude of a grayscale image
 
@@ -100,36 +128,7 @@ class SeamImage:
             - keep in mind that values must be in range [0,1]
             - np.gradient or other off-the-shelf tools are NOT allowed, however feel free to compare yourself to them
         """
-        # Sobel operators
-        sobel_x = np.array([[-1, 0, 1],
-                           [-2, 0, 2],
-                           [-1, 0, 1]], dtype=np.float32).flatten()
-        
-        sobel_y = np.array([[-1, -2, -1],
-                           [0, 0, 0],
-                           [1, 2, 1]], dtype=np.float32).flatten()
-        
-        # Pad the resized grayscale image
-        gs_src = self.resized_gs
-        gs_padded = np.pad(gs_src, ((1, 1), (1, 1)), mode='constant', constant_values=0.5)
-        
-        h, w = gs_src.shape
-        gradient_mag = np.zeros((h, w), dtype=np.float32)
-        
-        # Apply convolution using np.dot
-        for y in range(h):
-            for x in range(w):
-                neighborhood = gs_padded[y:y+3, x:x+3].flatten().astype(np.float32)
-                gx = np.dot(neighborhood, sobel_x)
-                gy = np.dot(neighborhood, sobel_y)
-                gradient_mag[y, x] = np.float32(np.sqrt(gx**2 + gy**2))
-        
-        # Normalize to [0, 1] range
-        max_val = np.max(gradient_mag)
-        if max_val > 0:
-            gradient_mag = gradient_mag / max_val
-        
-        return gradient_mag.astype(np.float32)
+        return _calc_gradient_magnitude(self.resized_gs.astype(np.float32))
 
 
     def update_ref_mat(self):
@@ -139,15 +138,11 @@ class SeamImage:
             - Given the latest computed seam, you need to track its original indices and mark them (self.cumm_mask) using self.ixd_map
             - Resize self.idx_map each seam update
         """
-        # Get the latest seam
-        seam = self.seam_history[-1]
-        
-        # Update cumm_mask with original indices from idx_map
-        for i, j in enumerate(seam):
-            orig_y, orig_x = self.idx_map[i, j]
-            self.cumm_mask[int(orig_y), int(orig_x)] = True
-        
-        # idx_map is resized in remove_seam; no resizing here
+        seam = np.array(self.seam_history[-1])
+        rows = np.arange(len(seam))
+        orig_yx = self.idx_map[rows, seam]          # shape (h, 2)
+        self.cumm_mask[orig_yx[:, 0].astype(int),
+                       orig_yx[:, 1].astype(int)] = True
 
     def reinit(self):
         """
@@ -247,7 +242,7 @@ class SeamImage:
         self.resized_rgb = np.rot90(self.resized_rgb, k=k)
         self.resized_gs = np.rot90(self.resized_gs, k=k)
         self.E = np.rot90(self.E, k=k)
-        self.cumm_mask = np.rot90(self.cumm_mask, k=k)
+        # cumm_mask tracks original-image coordinates — never rotate it
         
         if self.vis_seams:
             self.seams_rgb = np.rot90(self.seams_rgb, k=k)
@@ -300,7 +295,78 @@ class SeamImage:
             - Visualization: paint the added seams in green (0,255,0)
 
         """
-        raise NotImplementedError("TODO (Bonus): Implement SeamImage.seams_addition")
+        # ── Step 1: save current state before the discovery removals ──────────
+        saved_rgb     = self.resized_rgb.copy()
+        saved_gs      = self.resized_gs.copy()
+        saved_idx_map = self.idx_map.copy()
+        saved_w       = self.w
+
+        # ── Step 2: find the num_add cheapest seams via temporary removal ─────
+        # Disable vis so the discovery pass doesn't paint red / touch cumm_mask.
+        saved_vis      = self.vis_seams
+        self.vis_seams = False
+        hist_start     = len(self.seam_history)
+        self.seams_removal(num_add)
+        self.vis_seams = saved_vis
+        # seams recorded in shrinking-frame coordinates, in order of removal
+        new_seams = self.seam_history[hist_start:]
+
+        # ── Step 3: restore state ─────────────────────────────────────────────
+        self.resized_rgb = saved_rgb
+        self.resized_gs  = saved_gs
+        self.idx_map     = saved_idx_map
+        self.w           = saved_w
+
+        # ── Step 4: map shrinking-frame indices back to original-frame cols ───
+        # seams_orig[k, i] = column in the *original* (pre-removal) frame for
+        # seam k at row i.  Each removal shifts indices of later seams rightward
+        # by 1 for every earlier seam that sat at or to its left.
+        seams_orig = np.array(new_seams, dtype=int)   # shape (num_add, h)
+        for k in range(1, num_add):
+            for s in range(k):
+                seams_orig[k] += (seams_orig[s] <= seams_orig[k]).astype(int)
+
+        # ── Step 5: insert all seams into the live arrays ────────────────────
+        new_rgb     = np.zeros((self.h, self.w + num_add, 3), dtype=np.float32)
+        new_gs      = np.zeros((self.h, self.w + num_add),    dtype=np.float32)
+        new_idx_map = np.zeros((self.h, self.w + num_add, 2), dtype=self.idx_map.dtype)
+
+        for i in range(self.h):
+            # Original-frame insertion columns for this row, sorted ascending
+            cols = sorted(seams_orig[:, i])
+
+            rgb_row = list(self.resized_rgb[i])   # lists allow O(1) insert
+            gs_row  = list(self.resized_gs[i])
+            idx_row = list(self.idx_map[i])
+
+            for rank, orig_col in enumerate(cols):
+                # Each earlier insertion shifts the target position right by 1
+                ins = orig_col + rank + 1
+                ins = min(ins, len(rgb_row))   # clamp at row end
+
+                # New pixel = average of left and right neighbours
+                left_rgb  = np.array(rgb_row[ins - 1], dtype=np.float32)
+                right_rgb = np.array(rgb_row[min(ins, len(rgb_row) - 1)], dtype=np.float32)
+                left_gs   = gs_row[ins - 1]
+                right_gs  = gs_row[min(ins, len(gs_row) - 1)]
+
+                rgb_row.insert(ins, ((left_rgb + right_rgb) / 2).astype(np.float32))
+                gs_row.insert(ins,  np.float32((left_gs + right_gs) / 2))
+                idx_row.insert(ins, idx_row[ins - 1])  # inherit neighbour's orig coords
+
+                # Paint the corresponding original pixel green in seams_rgb
+                if self.vis_seams:
+                    orig_y, orig_x = self.idx_map[i, orig_col]
+                    self.seams_rgb[int(orig_y), int(orig_x)] = [0.0, 1.0, 0.0]
+
+            new_rgb[i]     = np.stack(rgb_row)
+            new_gs[i]      = np.array(gs_row, dtype=np.float32)
+            new_idx_map[i] = np.stack(idx_row)
+
+        self.resized_rgb = new_rgb
+        self.resized_gs  = new_gs
+        self.idx_map     = new_idx_map
+        self.w          += num_add
 
     def seams_addition_horizontal(self, num_add: int):
         """ A wrapper for removing num_add horizontal seams (just a recommendation)
@@ -312,21 +378,39 @@ class SeamImage:
             You may find np.rot90 function useful
 
         """
-        raise NotImplementedError("TODO (Bonus): Implement SeamImage.seams_addition_horizontal")
+        self.rotate_mats(clockwise=False)
+        self.seams_addition(num_add)
+        self.rotate_mats(clockwise=True)
 
-    @NI_decor
     def seams_addition_vertical(self, num_add: int):
         """ A wrapper for removing num_add vertical seams (just a recommendation)
 
         Parameters:
             num_add (int): number of vertical seam to be added
         """
-
-        raise NotImplementedError("TODO (Bonus): Implement SeamImage.seams_addition_vertical")
+        self.seams_addition(num_add)
 
 
 class GreedySeamImage(SeamImage):
     """Implementation of the Seam Carving algorithm using a greedy approach"""
+
+    @staticmethod
+    @jit(nopython=True)
+    def find_seam_static(E, h, w):
+        seam = np.zeros(h, dtype=np.int64)
+        seam[0] = np.argmin(E[0, :])
+        for i in range(1, h):
+            prev = seam[i - 1]
+            lo = max(prev - 1, np.int64(0))
+            hi = min(prev + 2, np.int64(w))
+            best_j = lo
+            best_e = E[i, lo]
+            for jj in range(lo + 1, hi):
+                if E[i, jj] < best_e:
+                    best_e = E[i, jj]
+                    best_j = jj
+            seam[i] = best_j
+        return seam
 
     @NI_decor
     def find_minimal_seam(self) -> List[int]:
@@ -337,24 +421,9 @@ class GreedySeamImage(SeamImage):
         The first pixel of the seam should be the pixel with the lowest cost.
         Every row chooses the next pixel based on which neighbor has the lowest cost.
         """
-        # build list to contain seam indices
-        seam = []
-    
-        # find minimal energy pixel in first row
-        min_energy_idx = np.argmin(self.E[0])
-        seam.append(min_energy_idx)
-        # iterate over rows and find the next pixel in the seam
-        for i in range(1, self.h):
-            prev_idx = seam[-1]
-            
-            # define the range of indices to check (prev_idx-1, prev_idx, prev_idx+1)
-            idx_range = range(max(prev_idx - 1, 0), min(prev_idx + 2, self.w))
-            
-            # find the index with the minimum energy in the current row within the defined range
-            min_energy_idx = min(idx_range, key=lambda x: self.E[i, x])
-            seam.append(min_energy_idx)
-
-        return seam
+        return list(GreedySeamImage.find_seam_static(
+            self.E.astype(np.float32), np.int64(self.h), np.int64(self.w)
+        ))
 
 
 class DPSeamImage(SeamImage):
@@ -371,7 +440,25 @@ class DPSeamImage(SeamImage):
         except NotImplementedError as e:
             print(e)
 
-    @NI_decor
+    @staticmethod
+    @jit(nopython=True)
+    def calc_M_static(E, gs):
+        h, w = E.shape
+        M = np.zeros((h, w), dtype=np.float32)
+        M[0, :] = E[0, :]
+        for i in range(1, h):
+            for j in range(w):
+                left  = gs[i, j - 1] if j > 0     else gs[i, j]
+                right = gs[i, j + 1] if j < w - 1 else gs[i, j]
+                c_v = abs(right - left)
+                c_l = c_v + abs(gs[i-1, j] - left)  if j > 0     else np.inf
+                c_r = c_v + abs(gs[i-1, j] - right) if j < w - 1 else np.inf
+                m_left  = M[i-1, j-1] + c_l if j > 0     else np.inf
+                m_up    = M[i-1, j]   + c_v
+                m_right = M[i-1, j+1] + c_r if j < w - 1 else np.inf
+                M[i, j] = E[i, j] + min(m_left, m_up, m_right)
+        return M
+
     def calc_M(self):
         """ Calculates the matrix M discussed in lecture (with forward-looking cost)
 
@@ -382,30 +469,10 @@ class DPSeamImage(SeamImage):
             As taught, the energy is calculated from top to bottom.
             You might find the function 'np.roll' useful.
         """
-        gs = self.resized_gs
-        h, w = gs.shape
-        M = np.zeros((h, w), dtype=np.float32)
-        
-        # Initialize first row with energy values
-        M[0, :] = self.E[0, :]
-        
-        # Fill the matrix row by row from top to bottom
-        for i in range(1, h):
-            for j in range(w):
-                left = gs[i, j - 1] if j > 0 else gs[i, j]
-                right = gs[i, j + 1] if j < w - 1 else gs[i, j]
-                
-                c_v = np.abs(right - left)
-                c_l = c_v + np.abs(gs[i - 1, j] - left) if j > 0 else np.inf
-                c_r = c_v + np.abs(gs[i - 1, j] - right) if j < w - 1 else np.inf
-                
-                m_left = M[i - 1, j - 1] + c_l if j > 0 else np.inf
-                m_up = M[i - 1, j] + c_v
-                m_right = M[i - 1, j + 1] + c_r if j < w - 1 else np.inf
-                
-                M[i, j] = self.E[i, j] + min(m_left, m_up, m_right)
-        
-        return M.astype(np.float32)
+        return DPSeamImage.calc_M_static(
+            self.E.astype(np.float32),
+            self.resized_gs.astype(np.float32)
+        )
 
     def init_mats(self):
         self.M = self.calc_M()
@@ -429,6 +496,39 @@ class DPSeamImage(SeamImage):
         h, w = M.shape
 
 
+    @staticmethod
+    @jit(nopython=True)
+    def find_seam_static(M, gs):
+        h, w = M.shape
+        backtrack = np.zeros((h, w), dtype=np.int32)
+        for i in range(1, h):
+            for j in range(w):
+                left  = gs[i, j-1] if j > 0     else gs[i, j]
+                right = gs[i, j+1] if j < w - 1 else gs[i, j]
+                c_v = abs(right - left)
+                c_l = c_v + abs(gs[i-1, j] - left)  if j > 0     else np.inf
+                c_r = c_v + abs(gs[i-1, j] - right) if j < w - 1 else np.inf
+                m_left  = M[i-1, j-1] + c_l if j > 0     else np.inf
+                m_up    = M[i-1, j]   + c_v
+                m_right = M[i-1, j+1] + c_r if j < w - 1 else np.inf
+                best = m_up
+                bt = np.int32(1)
+                if m_left < best:
+                    best = m_left
+                    bt = np.int32(0)
+                if m_right < best:
+                    bt = np.int32(2)
+                backtrack[i, j] = bt
+        seam = np.zeros(h, dtype=np.int64)
+        seam[h-1] = np.argmin(M[h-1, :])
+        for i in range(h-2, -1, -1):
+            j = seam[i+1]
+            bt = backtrack[i+1, j]
+            if bt == np.int32(0):   seam[i] = j - 1
+            elif bt == np.int32(2): seam[i] = j + 1
+            else:                   seam[i] = j
+        return seam
+
     def find_minimal_seam(self) -> List[int]:
         """
         Finds the minimal seam by using dynamic programming.
@@ -444,56 +544,12 @@ class DPSeamImage(SeamImage):
             ii) fill in the backtrack matrix corresponding to M
             iii) seam backtracking: calculates the actual indices of the seam
         """
-        # Step i: Update M matrix and initialize backtrack matrix
         self.M = self.calc_M()
-        gs = self.resized_gs
-        h, w = self.M.shape
-        backtrack_mat = np.zeros((h, w), dtype=int)
-        
-        # Step ii: Fill backtrack matrix using forward-looking costs
-        for i in range(1, h):
-            for j in range(w):
-                left = gs[i, j - 1] if j > 0 else gs[i, j]
-                right = gs[i, j + 1] if j < w - 1 else gs[i, j]
-                
-                c_v = np.abs(right - left)
-                c_l = c_v + np.abs(gs[i - 1, j] - left) if j > 0 else np.inf
-                c_r = c_v + np.abs(gs[i - 1, j] - right) if j < w - 1 else np.inf
-                
-                options = [
-                    self.M[i - 1, j - 1] + c_l if j > 0 else np.inf,
-                    self.M[i - 1, j] + c_v,
-                    self.M[i - 1, j + 1] + c_r if j < w - 1 else np.inf,
-                ]
-                backtrack_mat[i, j] = int(np.argmin(options))
-        
-        # Step iii: Backtrack from bottom to find the seam
-        seam = []
-        
-        # Find minimum in last row
-        min_j = np.argmin(self.M[-1, :])
-        seam.append(int(min_j))
-        
-        # Backtrack from bottom to top
-        for i in range(h - 1, 0, -1):
-            current_j = seam[-1]
-            move = backtrack_mat[i, current_j]
-            
-            # Reconstruct previous column based on move
-            # 0 = came from left diagonal, 1 = came from vertical, 2 = came from right diagonal
-            if move == 0:  # came from left
-                prev_j = current_j - 1
-            elif move == 1:  # came from vertical
-                prev_j = current_j
-            else:  # move == 2, came from right
-                prev_j = current_j + 1
-            
-            seam.append(int(prev_j))
-        
-        # Reverse seam (we built it bottom-up)
-        seam.reverse()
-        
-        return seam
+        seam = DPSeamImage.find_seam_static(
+            self.M,
+            self.resized_gs.astype(np.float32)
+        )
+        return list(seam)
 
 def scale_to_shape(orig_shape: np.ndarray, scale_factors: list):
     """ Converts scale into shape
