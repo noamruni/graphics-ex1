@@ -221,12 +221,16 @@ class SeamImage:
         # Update grayscale version
         self.resized_gs = self.resized_gs[mask].reshape(self.h, self.w - 1)
         
+        # Look up original coordinates BEFORE shrinking idx_map
+        if self.vis_seams:
+            orig_yx = self.idx_map[np.arange(self.h), seam]
+
         # Update idx_map by removing the seam column
         self.idx_map = self.idx_map[mask].reshape(self.h, self.w - 1, 2)
-        
-        # Mark seam on visualization if enabled (original indices handled in update_ref_mat)
+
+        # Mark seam on visualization using original coordinates
         if self.vis_seams:
-            self.seams_rgb[np.arange(self.h), seam] = [1.0, 0.0, 0.0]  # Red color
+            self.seams_rgb[orig_yx[:, 0].astype(int), orig_yx[:, 1].astype(int)] = [1.0, 0.0, 0.0]
         
         # Update dimensions
         self.w -= 1
@@ -242,11 +246,8 @@ class SeamImage:
         self.resized_rgb = np.rot90(self.resized_rgb, k=k)
         self.resized_gs = np.rot90(self.resized_gs, k=k)
         self.E = np.rot90(self.E, k=k)
-        # cumm_mask tracks original-image coordinates — never rotate it
-        
-        if self.vis_seams:
-            self.seams_rgb = np.rot90(self.seams_rgb, k=k)
-        
+        # cumm_mask and seams_rgb track original-image coordinates — never rotate them
+
         # Rotate index map
         self.idx_map = np.rot90(self.idx_map, k=k)
         

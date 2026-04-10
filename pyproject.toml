@@ -5,11 +5,11 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "functions>=0.7.0",
-    "ipykernel>=7.2.0",
-    "matplotlib>=3.10.8",
-    "numba==0.60.0",
-    "numpy>=2.0,<2.4",
-    "pillow>=10.4.0",
-    "tqdm>=4.66.0",
+    "functions",
+    "ipykernel",
+    "matplotlib",
+    "numba",
+    "numpy",
+    "pillow",
+    "tqdm",
 ]
